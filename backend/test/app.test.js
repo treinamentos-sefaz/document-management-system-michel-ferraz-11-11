@@ -1,12 +1,28 @@
 const { after, before, test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs/promises');
+const path = require('node:path');
+
+process.env.MAX_FILE_SIZE_BYTES = '64';
+
 const app = require('../src/app');
 const documentsRepository = require('../src/repositories/documents.repository');
+const documentsService = require('../src/services/documents.service');
 
 let server;
 let baseUrl;
+const storageDirectory = path.join(__dirname, '../storage');
 const createdDocumentIds = new Set();
+
+async function uploadFile(contents, fileName) {
+  const formData = new FormData();
+  formData.append('file', new Blob([contents]), fileName);
+
+  return fetch(`${baseUrl}/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+}
 
 before(async () => {
   server = app.listen(0);
@@ -33,13 +49,7 @@ test('o app backend é exportado', () => {
 });
 
 test('upload, listagem e download de documentos funcionam', async () => {
-  const formData = new FormData();
-  formData.append('file', new Blob(['conteudo de teste']), 'relatorio.txt');
-
-  const uploadResponse = await fetch(`${baseUrl}/upload`, {
-    method: 'POST',
-    body: formData,
-  });
+  const uploadResponse = await uploadFile('conteudo de teste', 'relatorio.txt');
   const uploadedDocument = await uploadResponse.json();
 
   assert.strictEqual(uploadResponse.status, 201);
@@ -81,4 +91,107 @@ test('download de documento inexistente retorna 404', async () => {
 
   assert.strictEqual(response.status, 404);
   assert.strictEqual(body.error.code, 'DOCUMENT_NOT_FOUND');
+});
+
+test('listagem expõe metadados públicos em ordem decrescente de data', () => {
+  const olderDocument = {
+    id: 'test-older-document',
+    originalName: 'antigo.txt',
+    size: 5,
+    uploadedAt: '2026-01-01T00:00:00.000Z',
+    owner: 'local-user',
+    storagePath: '/private/older-file',
+  };
+  const newerDocument = {
+    id: 'test-newer-document',
+    originalName: 'recente.txt',
+    size: 7,
+    uploadedAt: '2026-02-01T00:00:00.000Z',
+    owner: 'local-user',
+    storagePath: '/private/newer-file',
+  };
+
+  documentsRepository.save(olderDocument);
+  documentsRepository.save(newerDocument);
+
+  try {
+    const listedDocuments = documentsService.listDocuments();
+    const testDocuments = listedDocuments.filter((document) => document.id.startsWith('test-'));
+
+    assert.deepStrictEqual(
+      testDocuments.map((document) => document.id),
+      ['test-newer-document', 'test-older-document'],
+    );
+    assert.ok(testDocuments.every((document) => !Object.hasOwn(document, 'storagePath')));
+    assert.strictEqual(documentsRepository.findById(olderDocument.id).storagePath, olderDocument.storagePath);
+  } finally {
+    documentsRepository.remove(olderDocument.id);
+    documentsRepository.remove(newerDocument.id);
+  }
+});
+
+test('erro interno com statusCode não expõe mensagem ou caminho local', async () => {
+  const originalFindAll = documentsRepository.findAll;
+  documentsRepository.findAll = () => {
+    const error = new Error('Falha ao ler /backend/storage/private-file');
+    error.statusCode = 400;
+    error.code = 'INTERNAL_FAILURE';
+    throw error;
+  };
+
+  try {
+    const response = await fetch(`${baseUrl}/documents`);
+    const body = await response.json();
+
+    assert.strictEqual(response.status, 500);
+    assert.deepStrictEqual(body.error, {
+      code: 'INTERNAL_ERROR',
+      message: 'Ocorreu um erro interno.',
+    });
+  } finally {
+    documentsRepository.findAll = originalFindAll;
+  }
+});
+
+test('upload vazio é rejeitado e o arquivo temporário é removido', async () => {
+  const filesBefore = await fs.readdir(storageDirectory);
+  const response = await uploadFile('', 'vazio.txt');
+  const body = await response.json();
+  const filesAfter = await fs.readdir(storageDirectory);
+
+  assert.strictEqual(response.status, 400);
+  assert.strictEqual(body.error.code, 'INVALID_UPLOAD');
+  assert.deepStrictEqual(filesAfter, filesBefore);
+});
+
+test('upload acima do limite configurado retorna 413', async () => {
+  const filesBefore = await fs.readdir(storageDirectory);
+  const response = await uploadFile('x'.repeat(65), 'grande.txt');
+  const body = await response.json();
+  const filesAfter = await fs.readdir(storageDirectory);
+
+  assert.strictEqual(response.status, 413);
+  assert.strictEqual(body.error.code, 'FILE_TOO_LARGE');
+  assert.deepStrictEqual(filesAfter, filesBefore);
+});
+
+test('falha ao registrar metadados remove o arquivo gravado', async () => {
+  const originalSave = documentsRepository.save;
+  let uploadedPath;
+  documentsRepository.save = (document) => {
+    uploadedPath = document.storagePath;
+    throw new Error('Falha ao registrar /backend/storage/private-file');
+  };
+
+  try {
+    const response = await uploadFile('conteudo', 'falha.txt');
+    const body = await response.json();
+
+    assert.strictEqual(response.status, 500);
+    assert.strictEqual(body.error.code, 'INTERNAL_ERROR');
+    assert.ok(!body.error.message.includes('/backend/storage'));
+    await assert.rejects(fs.access(uploadedPath), (error) => error.code === 'ENOENT');
+  } finally {
+    documentsRepository.save = originalSave;
+  }
 });

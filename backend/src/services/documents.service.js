@@ -7,7 +7,12 @@ function createHttpError(statusCode, code, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
   error.code = code;
+  error.isPublic = true;
   return error;
+}
+
+function toPublicDocument({ storagePath, ...document }) {
+  return document;
 }
 
 function getOriginalName(name) {
@@ -48,12 +53,11 @@ async function createDocument(file) {
     throw error;
   }
 
-  const { storagePath, ...publicDocument } = document;
-  return publicDocument;
+  return toPublicDocument(document);
 }
 
 function listDocuments() {
-  return documentsRepository.findAll();
+  return documentsRepository.findAll().map(toPublicDocument);
 }
 
 function getDocumentById(id) {
