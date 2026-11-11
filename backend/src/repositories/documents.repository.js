@@ -6,8 +6,7 @@ function save(document) {
 
 function findAll() {
   return [...documents.values()]
-    .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt))
-    .map(({ storagePath, ...document }) => document);
+    .sort((left, right) => right.uploadedAt.localeCompare(left.uploadedAt));
 }
 
 function findById(id) {

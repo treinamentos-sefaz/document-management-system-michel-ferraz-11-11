@@ -45,15 +45,17 @@ app.use((error, req, res, next) => {
     });
   }
 
-  const isClientError = Number.isInteger(error.statusCode)
+  const isPublicError = error.isPublic === true
+    && typeof error.code === 'string'
+    && Number.isInteger(error.statusCode)
     && error.statusCode >= 400
     && error.statusCode < 500;
-  const statusCode = isClientError ? error.statusCode : 500;
+  const statusCode = isPublicError ? error.statusCode : 500;
 
   return res.status(statusCode).json({
     error: {
-      code: isClientError ? error.code : 'INTERNAL_ERROR',
-      message: isClientError ? error.message : 'Ocorreu um erro interno.',
+      code: isPublicError ? error.code : 'INTERNAL_ERROR',
+      message: isPublicError ? error.message : 'Ocorreu um erro interno.',
     },
   });
 });
